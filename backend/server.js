@@ -16,7 +16,7 @@ let helpRequests = [];
 // Create a help request
 // -----------------------------
 app.post("/api/help-requests", (req, res) => {
-  const { title, description, name } = req.body;
+  const { title, description, name, category, location } = req.body;
 
   if (!title || !description || !name) {
     return res.status(400).json({ message: "All fields are required" });
@@ -27,6 +27,9 @@ app.post("/api/help-requests", (req, res) => {
     title,
     description,
     name,
+    category: category || "Errand / daily life",
+    location: location || "",
+    status: "open",
     createdAt: new Date(),
     responses: []
   };
@@ -75,6 +78,30 @@ app.post("/api/help-requests/:id/respond", (req, res) => {
   request.responses.push(newResponse);
 
   res.status(201).json(request);
+});
+
+// -----------------------------
+// POST /api/help-requests/:id/status
+// Update the status of a help request
+// -----------------------------
+app.post("/api/help-requests/:id/status", (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const allowed = ["open", "in_progress", "resolved"];
+  if (!allowed.includes(status)) {
+    return res.status(400).json({ message: "Invalid status" });
+  }
+
+  const request = helpRequests.find(r => r.id === Number(id));
+  if (!request) {
+    return res.status(404).json({ message: "Help request not found" });
+  }
+
+  request.status = status;
+  request.statusUpdatedAt = new Date();
+
+  res.json(request);
 });
 
 // -----------------------------
