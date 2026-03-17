@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
+import { isSupabaseConfigured, supabase } from "./lib/supabaseClient";
 
 function StatusPill({ status }) {
   const label = status === "resolved"
@@ -134,16 +135,78 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const usingSupabase = isSupabaseConfigured;
+
   useEffect(() => {
     const loadRequests = async () => {
+      setLoading(true);
+      setError("");
       try {
-        const res = await fetch("http://localhost:5000/api/help-requests");
-        if (!res.ok) throw new Error("Failed to fetch requests");
-        const data = await res.json();
-        setHelpRequests(data);
+        if (usingSupabase) {
+          const { data: requests, error: reqErr } = await supabase
+            .from("help_requests")
+            .select(
+              "id,title,description,category,location,status,created_by_name,created_by_email,created_by_role,created_at,status_updated_at"
+            )
+            .order("created_at", { ascending: false });
+
+          if (reqErr) throw reqErr;
+
+          const ids = (requests || []).map(r => r.id);
+          const { data: responses, error: respErr } = await supabase
+            .from("help_responses")
+            .select(
+              "id,request_id,volunteer_name,volunteer_email,message,responded_at"
+            )
+            .in(
+              "request_id",
+              ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]
+            )
+            .order("responded_at", { ascending: true });
+
+          if (respErr) throw respErr;
+
+          const responsesByReq = (responses || []).reduce((acc, r) => {
+            acc[r.request_id] = acc[r.request_id] || [];
+            acc[r.request_id].push({
+              id: r.id,
+              volunteerName: r.volunteer_name,
+              volunteerEmail: r.volunteer_email || "",
+              message: r.message,
+              respondedAt: r.responded_at
+            });
+            return acc;
+          }, {});
+
+          const mapped = (requests || []).map(r => ({
+            id: r.id,
+            title: r.title,
+            description: r.description,
+            category: r.category,
+            location: r.location,
+            status: r.status,
+            name: r.created_by_name,
+            email: r.created_by_email || "",
+            createdByRole: r.created_by_role,
+            createdAt: r.created_at,
+            statusUpdatedAt: r.status_updated_at,
+            responses: responsesByReq[r.id] || []
+          }));
+
+          setHelpRequests(mapped);
+        } else {
+          const res = await fetch("http://localhost:5000/api/help-requests");
+          if (!res.ok) throw new Error("Failed to fetch requests");
+          const data = await res.json();
+          setHelpRequests(data);
+        }
       } catch (err) {
         console.error(err);
-        setError("Could not load requests. Please try again later.");
+        setError(
+          usingSupabase
+            ? "Could not load requests from Supabase. Check your keys and RLS policies."
+            : "Could not load requests. Please try again later."
+        );
       } finally {
         setLoading(false);
       }
@@ -174,24 +237,62 @@ function App() {
     }
 
     try {
-      const res = await fetch("http://localhost:5000/api/help-requests", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (usingSupabase) {
+        const payload = {
           title,
           description,
-          name,
           category,
           location,
-          createdByRole: currentUser.role
-        })
-      });
+          status: "open",
+          created_by_name: name,
+          created_by_email: currentUser.email || null,
+          created_by_role: currentUser.role
+        };
 
-      if (!res.ok) throw new Error("Failed to create request");
+        const { data, error: insErr } = await supabase
+          .from("help_requests")
+          .insert(payload)
+          .select()
+          .single();
 
-      const newRequest = await res.json();
+        if (insErr) throw insErr;
 
-      setHelpRequests(prev => [newRequest, ...prev]);
+        const newRequest = {
+          id: data.id,
+          title: data.title,
+          description: data.description,
+          category: data.category,
+          location: data.location,
+          status: data.status,
+          name: data.created_by_name,
+          email: data.created_by_email || "",
+          createdByRole: data.created_by_role,
+          createdAt: data.created_at,
+          statusUpdatedAt: data.status_updated_at,
+          responses: []
+        };
+
+        setHelpRequests(prev => [newRequest, ...prev]);
+      } else {
+        const res = await fetch("http://localhost:5000/api/help-requests", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            description,
+            name,
+            category,
+            location,
+            createdByRole: currentUser.role
+          })
+        });
+
+        if (!res.ok) throw new Error("Failed to create request");
+
+        const newRequest = await res.json();
+        setHelpRequests(prev => [newRequest, ...prev]);
+      }
+
       setTitle("");
       setDescription("");
       setName("");
@@ -203,49 +304,122 @@ function App() {
   };
 
   const handleRespond = async (id, payload) => {
-    const res = await fetch(
-      `http://localhost:5000/api/help-requests/${id}/respond`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+    try {
+      if (usingSupabase) {
+        const insertPayload = {
+          request_id: id,
+          volunteer_name: payload.volunteerName,
+          volunteer_email: currentUser.email || null,
+          message: payload.message
+        };
+
+        const { data: resp, error: respErr } = await supabase
+          .from("help_responses")
+          .insert(insertPayload)
+          .select()
+          .single();
+
+        if (respErr) throw respErr;
+
+        const newResponse = {
+          id: resp.id,
+          volunteerName: resp.volunteer_name,
+          volunteerEmail: resp.volunteer_email || "",
+          message: resp.message,
+          respondedAt: resp.responded_at
+        };
+
+        setHelpRequests(prev =>
+          prev.map(r =>
+            r.id === id ? { ...r, responses: [...r.responses, newResponse] } : r
+          )
+        );
+      } else {
+        const res = await fetch(
+          `http://localhost:5000/api/help-requests/${id}/respond`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          }
+        );
+
+        if (!res.ok) {
+          alert("Could not send response. Please try again.");
+          return;
+        }
+
+        const updatedRequest = await res.json();
+
+        setHelpRequests(prev =>
+          prev.map(r => (r.id === updatedRequest.id ? updatedRequest : r))
+        );
       }
-    );
-
-    if (!res.ok) {
+    } catch (err) {
+      console.error(err);
       alert("Could not send response. Please try again.");
-      return;
     }
-
-    const updatedRequest = await res.json();
-
-    setHelpRequests(prev =>
-      prev.map(r => (r.id === updatedRequest.id ? updatedRequest : r))
-    );
   };
 
   const updateStatus = async (id, status) => {
-    const res = await fetch(
-      `http://localhost:5000/api/help-requests/${id}/status`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status })
+    try {
+      if (usingSupabase) {
+        const { data, error: updErr } = await supabase
+          .from("help_requests")
+          .update({ status, status_updated_at: new Date().toISOString() })
+          .eq("id", id)
+          .select()
+          .single();
+
+        if (updErr) throw updErr;
+
+        const updatedRequest = {
+          id: data.id,
+          title: data.title,
+          description: data.description,
+          category: data.category,
+          location: data.location,
+          status: data.status,
+          name: data.created_by_name,
+          email: data.created_by_email || "",
+          createdByRole: data.created_by_role,
+          createdAt: data.created_at,
+          statusUpdatedAt: data.status_updated_at,
+          responses: helpRequests.find(r => r.id === id)?.responses || []
+        };
+
+        setHelpRequests(prev =>
+          prev.map(r => (r.id === updatedRequest.id ? updatedRequest : r))
+        );
+      } else {
+        const res = await fetch(
+          `http://localhost:5000/api/help-requests/${id}/status`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status })
+          }
+        );
+
+        if (!res.ok) {
+          alert("Could not update status. Please try again.");
+          return;
+        }
+
+        const updatedRequest = await res.json();
+        setHelpRequests(prev =>
+          prev.map(r => (r.id === updatedRequest.id ? updatedRequest : r))
+        );
       }
-    );
-
-    if (!res.ok) {
+    } catch (err) {
+      console.error(err);
       alert("Could not update status. Please try again.");
-      return;
     }
-
-    const updatedRequest = await res.json();
-    setHelpRequests(prev =>
-      prev.map(r => (r.id === updatedRequest.id ? updatedRequest : r))
-    );
   };
 
-  const filteredRequests = helpRequests
+  const filteredRequests = useMemo(
+    () =>
+      helpRequests
     .filter(req => {
       if (view === "mine_requests") {
         return req.name.toLowerCase() === currentUser.name.toLowerCase();
@@ -265,7 +439,9 @@ function App() {
     .filter(req => {
       if (categoryFilter === "all") return true;
       return req.category === categoryFilter;
-    });
+    }),
+    [categoryFilter, currentUser.name, helpRequests, statusFilter, view]
+  );
 
   return (
     <div className="container">
@@ -336,6 +512,14 @@ function App() {
                 </label>
               </div>
             </div>
+            {!usingSupabase && (
+              <div className="helper-text" style={{ marginTop: 8 }}>
+                Supabase is not configured yet — using local API at{" "}
+                <code>http://localhost:5000</code>. Add{" "}
+                <code>REACT_APP_SUPABASE_URL</code> and{" "}
+                <code>REACT_APP_SUPABASE_ANON_KEY</code> to switch to Supabase.
+              </div>
+            )}
           </div>
         </div>
 
