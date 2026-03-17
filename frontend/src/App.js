@@ -134,6 +134,11 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [authUser, setAuthUser] = useState(null);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authMode, setAuthMode] = useState("signin"); // or signup
+  const [authMessage, setAuthMessage] = useState("");
 
   const usingSupabase = isSupabaseConfigured;
 
@@ -215,6 +220,43 @@ function App() {
     loadRequests();
   }, []);
 
+  // Keep track of Supabase auth user (if Supabase is enabled)
+  useEffect(() => {
+    if (!usingSupabase) return;
+
+    let mounted = true;
+
+    const initAuth = async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (!mounted) return;
+      if (error) {
+        console.error("Error loading auth user", error);
+        return;
+      }
+      setAuthUser(data.user ?? null);
+      if (data.user?.email && !currentUser.email) {
+        setCurrentUser(prev => ({ ...prev, email: data.user.email }));
+      }
+    };
+
+    initAuth();
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user ?? null;
+      setAuthUser(user);
+      if (user?.email && !currentUser.email) {
+        setCurrentUser(prev => ({ ...prev, email: user.email }));
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, [currentUser.email, usingSupabase]);
+
   useEffect(() => {
     localStorage.setItem("nn-current-user", JSON.stringify(currentUser));
   }, [currentUser]);
@@ -238,6 +280,13 @@ function App() {
 
     try {
       if (usingSupabase) {
+        const {
+          data: { user }
+        } = await supabase.auth.getUser();
+
+        const effectiveEmail =
+          currentUser.email || user?.email || null;
+
         const payload = {
           title,
           description,
@@ -245,8 +294,9 @@ function App() {
           location,
           status: "open",
           created_by_name: name,
-          created_by_email: currentUser.email || null,
-          created_by_role: currentUser.role
+          created_by_email: effectiveEmail,
+          created_by_role: currentUser.role,
+          created_by_user_id: user?.id ?? null
         };
 
         const { data, error: insErr } = await supabase
@@ -306,10 +356,15 @@ function App() {
   const handleRespond = async (id, payload) => {
     try {
       if (usingSupabase) {
+        const {
+          data: { user }
+        } = await supabase.auth.getUser();
+
         const insertPayload = {
           request_id: id,
           volunteer_name: payload.volunteerName,
-          volunteer_email: currentUser.email || null,
+          volunteer_email: currentUser.email || user?.email || null,
+          volunteer_user_id: user?.id ?? null,
           message: payload.message
         };
 
@@ -443,6 +498,48 @@ function App() {
     [categoryFilter, currentUser.name, helpRequests, statusFilter, view]
   );
 
+  const handleAuthSubmit = async e => {
+    e.preventDefault();
+    if (!usingSupabase) {
+      alert("Auth requires Supabase to be configured.");
+      return;
+    }
+    if (!authEmail || !authPassword) {
+      setAuthMessage("Please enter email and password.");
+      return;
+    }
+
+    try {
+      setAuthMessage("");
+      if (authMode === "signup") {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword
+        });
+        if (error) throw error;
+        setAuthMessage(
+          "Check your email to confirm your account, then sign in."
+        );
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword
+        });
+        if (error) throw error;
+        setAuthMessage("Signed in.");
+      }
+    } catch (err) {
+      console.error(err);
+      setAuthMessage(err.message || "Authentication failed.");
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (!usingSupabase) return;
+    await supabase.auth.signOut();
+    setAuthMessage("Signed out.");
+  };
+
   return (
     <div className="container">
       <div className="card">
@@ -461,9 +558,8 @@ function App() {
             <div className="pill">Full‑stack community support MVP</div>
             <div style={{ marginTop: 10 }}>
               <div className="signin-panel">
-                <span>Signed in as</span>
+                <span>Display as</span>
                 <input
-                  type="text"
                   placeholder="Name"
                   value={currentUser.name}
                   onChange={e =>
@@ -511,6 +607,76 @@ function App() {
                   Volunteer
                 </label>
               </div>
+              {usingSupabase && (
+                <form
+                  onSubmit={handleAuthSubmit}
+                  style={{
+                    marginTop: 8,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    fontSize: 11
+                  }}
+                >
+                  <span>
+                    Account{" "}
+                    {authUser?.email ? `(${authUser.email})` : "(not signed in)"}
+                  </span>
+                  <input
+                    type="email"
+                    placeholder="Email"
+                    value={authEmail}
+                    onChange={e => setAuthEmail(e.target.value)}
+                    style={{ padding: "4px 8px", borderRadius: 999 }}
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password"
+                    value={authPassword}
+                    onChange={e => setAuthPassword(e.target.value)}
+                    style={{ padding: "4px 8px", borderRadius: 999 }}
+                  />
+                  <select
+                    value={authMode}
+                    onChange={e => setAuthMode(e.target.value)}
+                    style={{ padding: "4px 8px", borderRadius: 999 }}
+                  >
+                    <option value="signin">Sign in</option>
+                    <option value="signup">Sign up</option>
+                  </select>
+                  <button type="submit" style={{ padding: "6px 12px" }}>
+                    {authMode === "signup" ? "Create account" : "Sign in"}
+                  </button>
+                  {authUser && (
+                    <button
+                      type="button"
+                      onClick={handleSignOut}
+                      style={{
+                        padding: "6px 12px",
+                        background:
+                          "linear-gradient(135deg, #6b7280, #4b5563)",
+                        boxShadow: "none",
+                        color: "#f9fafb"
+                      }}
+                    >
+                      Sign out
+                    </button>
+                  )}
+                  {authMessage && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: authMessage.includes("failed")
+                          ? "#b91c1c"
+                          : "#047857"
+                      }}
+                    >
+                      {authMessage}
+                    </span>
+                  )}
+                </form>
+              )}
             </div>
             {!usingSupabase && (
               <div className="helper-text" style={{ marginTop: 8 }}>
@@ -614,19 +780,11 @@ function App() {
 
           <p className="helper-text" style={{ marginBottom: 6 }}>
             {currentUser.role === "volunteer"
-              ? "You’re signed in as a volunteer. Browse open requests below and respond where you can help most."
-              : "You’re signed in as a neighbour. Use this list to keep track of your requests and see who has responded."}
+              ? "You’re signed in as a volunteer. Browse open requests and respond where you can help most."
+              : "You’re signed in as a neighbour. Track your requests and see who has responded."}
           </p>
 
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              marginBottom: 10,
-              fontSize: 11
-            }}
-          >
+          <div className="filters-bar">
             <div className="pill">
               View:
               <select
@@ -697,8 +855,9 @@ function App() {
             filteredRequests.map(req => (
               <RequestCard
                 key={req.id}
-                request={{ ...req, onChangeStatus: status =>
-                  updateStatus(req.id, status)
+                request={{
+                  ...req,
+                  onChangeStatus: status => updateStatus(req.id, status)
                 }}
                 onRespond={handleRespond}
               />
