@@ -498,6 +498,27 @@ function App() {
     [categoryFilter, currentUser.name, helpRequests, statusFilter, view]
   );
 
+  // Simple "intelligence": sort by how relevant a request is to the
+  // current user (matching area and category, and still open first).
+  const scoredRequests = useMemo(() => {
+    const lowerLocation = location.toLowerCase().trim();
+    const lowerCategory = category.toLowerCase().trim();
+
+    return filteredRequests
+      .map(req => {
+        let score = 0;
+        if (req.status === "open") score += 2;
+        if (lowerLocation && req.location.toLowerCase().includes(lowerLocation)) {
+          score += 2;
+        }
+        if (lowerCategory && req.category.toLowerCase() === lowerCategory) {
+          score += 1;
+        }
+        return { ...req, _score: score };
+      })
+      .sort((a, b) => b._score - a._score || b.createdAt.localeCompare(a.createdAt));
+  }, [filteredRequests, location, category]);
+
   const handleAuthSubmit = async e => {
     e.preventDefault();
     if (!usingSupabase) {
@@ -852,7 +873,7 @@ function App() {
           )}
 
           {!loading &&
-            filteredRequests.map(req => (
+            scoredRequests.map(req => (
               <RequestCard
                 key={req.id}
                 request={{
@@ -862,6 +883,26 @@ function App() {
                 onRespond={handleRespond}
               />
             ))}
+        </div>
+
+        <div style={{ marginTop: 32 }}>
+          <div className="section-title">
+            About NeighbourNetk <span>why this exists</span>
+          </div>
+          <p className="helper-text">
+            NeighbourNetk is inspired by mutual‑aid projects that started during
+            crises, when people needed a simple way to say “here is what I need”
+            and “here is how I can help”. The goal is not to replace charities
+            or public services, but to make it easier for neighbours to notice
+            and respond to each other&apos;s needs.
+          </p>
+          <p className="helper-text">
+            Technically, the project is built as a teaching and portfolio
+            piece: it demonstrates a full stack web application using React,
+            Supabase (Postgres + Auth + Row Level Security), and deliberately
+            simple UX so the flows remain easy to understand in interviews and
+            graduate‑school applications.
+          </p>
         </div>
       </div>
     </div>
